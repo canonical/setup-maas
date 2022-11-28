@@ -1,0 +1,63 @@
+name: "Install and configure MAAS"
+author: "Canonical <webteam@canonical.com>"
+description: "Install and configures Dotrun"
+branding:
+  icon: "package"
+  color: "green"
+inputs:
+  channel:
+    description: "Snap channel to install MAAS from"
+    required: false
+    default: "latest/stable"
+  maas-url:
+    description: "URL of MAAS"
+    required: false
+    default: "http://localhost:5240/MAAS"
+  use-maasdb-dump:
+    description: "Setup MAAS with a test database dump"
+    required: false
+    default: "false"
+  maasdb-dump-url:
+    description: "URL to the MAAS database dump"
+    required: false
+    default: "https://github.com/canonical/maas-ui-testing/raw/main/db/maasdb-22.04-master-100.dump"
+  wait-for-maas-ui:
+    description: "Wait for MAAS UI"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install MAAS
+      shell: bash
+      run: |
+        set -x
+        sudo systemctl enable snapd
+        sudo snap install maas --channel=${{ inputs.channel }}
+        sudo snap install maas-test-db --channel=${{ inputs.channel }}
+    - name: Fetch MAAS database dump
+      if: inputs.should-setup-test-db-dump == 'true'
+      uses: wei/wget@v1
+      with:
+        args: -O maasdb.dump ${{ inputs.maasdb-dump-url }}
+    - name: Set up MAAS with database dump
+      if: inputs.should-setup-test-db-dump == 'true'
+      shell: bash
+      run: |
+        set -x
+        sudo sed -i "s/dynamic_shared_memory_type = posix/dynamic_shared_memory_type = sysv/" /var/snap/maas-test-db/common/postgres/data/postgresql.conf
+        sudo snap restart maas-test-db
+        sudo mv maasdb.dump /var/snap/maas-test-db/common/maasdb.dump
+        sudo snap run --shell maas-test-db.psql -c 'db-dump restore /var/snap/maas-test-db/common/maasdb.dump maassampledata'
+        sudo maas init region+rack --maas-url=${{inputs.maas-url}} --database-uri maas-test-db:///
+        sudo sed -i "s/database_name: maasdb/database_name: maassampledata/" /var/snap/maas/current/regiond.conf
+        sudo snap restart maas
+    - name: Wait for MAAS
+      if: inputs.wait-for-maas-ui == 'true'
+      uses: nev7n/wait_for_response@v1
+      with:
+        url: "${{inputs.maas-url}}/r"
+        responseCode: 200
+        timeout: 200000
+        interval: 500
