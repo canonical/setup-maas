@@ -8,7 +8,7 @@ inputs:
   channel:
     description: "Snap channel to install MAAS from"
     required: false
-    default: "latest/stable"
+    default: "latest/edge"
   maas-url:
     description: "URL of MAAS"
     required: false
@@ -37,12 +37,12 @@ runs:
         sudo snap install maas --channel=${{ inputs.channel }}
         sudo snap install maas-test-db --channel=${{ inputs.channel }}
     - name: Fetch MAAS database dump
-      if: inputs.should-setup-test-db-dump == 'true'
+      if: inputs.use-maasdb-dump == 'true'
       uses: wei/wget@v1
       with:
         args: -O maasdb.dump ${{ inputs.maasdb-dump-url }}
     - name: Set up MAAS with database dump
-      if: inputs.should-setup-test-db-dump == 'true'
+      if: inputs.use-maasdb-dump == 'true'
       shell: bash
       run: |
         set -x
@@ -53,11 +53,17 @@ runs:
         sudo maas init region+rack --maas-url=${{inputs.maas-url}} --database-uri maas-test-db:///
         sudo sed -i "s/database_name: maasdb/database_name: maassampledata/" /var/snap/maas/current/regiond.conf
         sudo snap restart maas
+    - name: Set up MAAS
+      if: inputs.use-maasdb-dump == 'false'
+      shell: bash
+      run: |
+        set -x
+        sudo maas init region+rack --maas-url=${{inputs.maas-url}} --database-uri maas-test-db:///
     - name: Wait for MAAS
       if: inputs.wait-for-maas-ui == 'true'
       uses: nev7n/wait_for_response@v1
       with:
-        url: "${{inputs.maas-url}}/r"
+        url: "${{inputs.maas-url}}/r/"
         responseCode: 200
         timeout: 200000
         interval: 500

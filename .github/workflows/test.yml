@@ -1,0 +1,19 @@
+name: Tests
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  setup-maas:
+    name: Setup MAAS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: canonical/setup-maas@main
+      - name: Create MAAS admin
+        run: sudo maas createadmin --username=admin --password=test --email=fake@example.org
+  setup-maas-with-db-dump:
+    name: Setup MAAS with dump database
+    runs-on: ubuntu-latest
+    steps:
+      - uses: canonical/setup-maas@main
+        with:
+          use-maasdb-dump: true
+      - name: Create MAAS admin
+        run: sudo maas createadmin --username=admin --password=test --email=fake@example.org
