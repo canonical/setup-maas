@@ -17,3 +17,10 @@ jobs:
           use-maasdb-dump: true
       - name: Create MAAS admin
         run: sudo maas createadmin --username=admin --password=test --email=fake@example.org
+  wait-for-maas-ui:
+    name: Wait for MAAS UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: canonical/setup-maas@main
+        with:
+          wait-for-maas-ui: true
