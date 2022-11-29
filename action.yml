@@ -12,7 +12,7 @@ inputs:
   maas-url:
     description: "URL of MAAS"
     required: false
-    default: "http://localhost:5240/MAAS"
+    default: "http://0.0.0.0:5240/MAAS"
   use-maasdb-dump:
     description: "Setup MAAS with a test database dump"
     required: false
@@ -59,6 +59,27 @@ runs:
       run: |
         set -x
         sudo maas init region+rack --maas-url=${{inputs.maas-url}} --database-uri maas-test-db:///
+    - name: Get MAAS response code
+      shell: bash
+      run: |
+        set -x
+        curl -s -o /dev/null -w "%{http_code}" ${{ inputs.maas-url }}/r/
+    - name: Update firewall configuration
+      shell: bash
+      run: |
+        set -x
+        sudo ufw status
+        sudo ufw allow 5240
+        sudo ufw allow 5248
+        sudo ufw allow 5241:5247/tcp
+        sudo ufw allow 5241:5247/udp
+        sudo ufw allow 5250:5270/tcp
+        sudo ufw allow 5250:5270/udp
+    - name: Get MAAS response code
+      shell: bash
+      run: |
+        set -x
+        curl -s -o /dev/null -w "%{http_code}" ${{ inputs.maas-url }}/r/
     - name: Wait for MAAS
       if: inputs.wait-for-maas-ui == 'true'
       uses: nev7n/wait_for_response@v1

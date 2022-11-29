@@ -17,6 +17,11 @@ jobs:
           use-maasdb-dump: true
       - name: Create MAAS admin
         run: sudo maas createadmin --username=admin --password=test --email=fake@example.org
+      - name: Get MAAS response code
+        shell: bash
+        run: |
+          set -x
+          curl -s -o /dev/null -w "%{http_code}" http://0.0.0.0:5240/MAAS/r/
   wait-for-maas-ui:
     name: Wait for MAAS UI
     runs-on: ubuntu-latest
