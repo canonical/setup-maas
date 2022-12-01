@@ -21,10 +21,6 @@ inputs:
     description: "URL to the MAAS database dump"
     required: false
     default: "https://github.com/canonical/maas-ui-testing/raw/main/db/maasdb-22.04-master-100.dump"
-  wait-for-maas-ui:
-    description: "Wait for MAAS UI"
-    required: false
-    default: "false"
 
 runs:
   using: "composite"
@@ -59,11 +55,3 @@ runs:
       run: |
         set -x
         sudo maas init region+rack --maas-url=${{inputs.maas-url}} --database-uri maas-test-db:///
-    - name: Wait for MAAS
-      if: inputs.wait-for-maas-ui == 'true'
-      uses: nev7n/wait_for_response@v1
-      with:
-        url: "${{inputs.maas-url}}/r/"
-        responseCode: 200
-        timeout: 500000
-        interval: 500
