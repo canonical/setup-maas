@@ -1,6 +1,6 @@
-name: "Install and configure MAAS"
+name: "Setup MAAS"
 author: "Canonical <webteam@canonical.com>"
-description: "Install and configures Dotrun"
+description: "Install and configure MAAS"
 branding:
   icon: "package"
   color: "green"
