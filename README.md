@@ -1,4 +1,7 @@
-# setup-maas
+# Setup MAAS GitHub Action
+
+![Tests](https://github.com/canonical/setup-maas/actions/workflows/test.yml/badge.svg)
+
 A GitHub Action for installing and configuring MAAS
 
 ## Usage
