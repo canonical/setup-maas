@@ -55,6 +55,12 @@ runs:
       run: |
         set -x
         sudo maas init region+rack --maas-url=${{inputs.maas-url}} --database-uri maas-test-db:///
+    - name: Create MAAS administrator
+      shell: bash
+      run: |
+        sudo maas createadmin --username=administrator --password=test --email=fake@example.org
+        export API_KEY=`sudo maas apikey --username=administrator`
+        maas login administrator http://localhost:5240/MAAS $API_KEY
     - name: Wait for MAAS boot resources
       shell: bash
-      run: while [ $(maas admin boot-resources is-importing | cat) == "true" ]; do sleep 10; done; echo "syncing finished"
+      run: while [ $(maas administrator boot-resources is-importing | cat) == "true" ]; do sleep 10; done; echo "syncing finished"
