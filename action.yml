@@ -30,6 +30,7 @@ runs:
       run: |
         set -x
         sudo systemctl enable snapd
+        sudo snap refresh snapd
         sudo snap install maas --channel=${{ inputs.channel }}
         sudo snap install maas-test-db --channel=${{ inputs.channel }}
     - name: Fetch MAAS database dump
