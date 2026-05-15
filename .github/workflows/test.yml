@@ -21,7 +21,7 @@ jobs:
           echo "MAAS API failed to become ready"
           exit 1
       - name: Create MAAS admin
-        run: lxc exec maas-backend -- maas createadmin --username=admin --password=test --email=fake@example.org
+        run: sudo maas createadmin --username=admin --password=test --email=fake@example.org
   setup-maas-with-db-dump:
     name: Setup MAAS with dump database
     runs-on: ubuntu-latest
@@ -44,4 +44,4 @@ jobs:
           echo "MAAS API failed to become ready"
           exit 1
       - name: Verify admin user exists (from dump)
-        run: lxc exec maas-backend -- maas admin users list | grep -q admin && echo "Admin user already exists from dump" || echo "Admin user not found"
+        run: sudo maas admin users list | grep -q admin && echo "Admin user already exists from dump" || echo "Admin user not found"

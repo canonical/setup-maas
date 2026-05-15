@@ -6,13 +6,13 @@ branding:
   color: "green"
 inputs:
   channel:
-    description: "MAAS snap channel — used to select the git branch to build from (e.g. latest/edge → master, 3.5/stable → stable/3.5)"
+    description: "Snap channel to install MAAS from"
     required: false
     default: "latest/edge"
   maas-url:
-    description: "URL of MAAS (defaults to the LXD container IP resolved at runtime)"
+    description: "URL of MAAS"
     required: false
-    default: ""
+    default: "http://localhost:5240/MAAS"
   use-maasdb-dump:
     description: "Setup MAAS with a test database dump"
     required: false
@@ -25,113 +25,36 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Resolve MAAS git ref from channel
-      id: resolve-ref
-      shell: bash
-      run: |
-        CHANNEL="${{ inputs.channel }}"
-        if [[ "$CHANNEL" == "latest/edge" || "$CHANNEL" == "latest/beta" ]]; then
-          REF="master"
-        elif [[ "$CHANNEL" =~ ^([0-9]+\.[0-9]+)/ ]]; then
-          REF="stable/${BASH_REMATCH[1]}"
-        else
-          REF="master"
-        fi
-        echo "ref=$REF" >> "$GITHUB_OUTPUT"
-        echo "Resolved channel '$CHANNEL' to git ref '$REF'"
-
-    - name: Checkout canonical/maas
-      uses: actions/checkout@v5
-      with:
-        repository: canonical/maas
-        ref: ${{ steps.resolve-ref.outputs.ref }}
-        fetch-depth: 0
-        path: maas-source
-
-    - name: Setup LXD
-      uses: canonical/setup-lxd@v1
-      with:
-        channel: 5.21/stable
-
-    - name: Build MAAS snap
+    - name: Install MAAS
       shell: bash
       run: |
         set -x
+        sudo systemctl enable snapd
         sudo snap install snapcraft --classic
         sudo snap refresh snapd
         sudo snap install --candidate core26
-        cd "$GITHUB_WORKSPACE/maas-source"
-        make snap
-        make snap-clean
-
-    - name: Setup LXD container
-      id: setup-lxd
-      shell: bash
-      run: |
-        set -x
-        cd "$GITHUB_WORKSPACE/maas-source"
-        lxc launch ubuntu:resolute maas-backend
-        lxc exec maas-backend -- cloud-init status --wait
-        lxc exec maas-backend -- snap install snapd --beta
-        lxc exec maas-backend -- snap wait system seed.loaded
-        lxc exec maas-backend -- snap install --candidate core26
-        lxc file push *.snap maas-backend/maas.snap
-        lxc file push utilities/connect-snap-interfaces maas-backend/connect-snap-interfaces
-        lxc exec maas-backend -- snap install maas-test-db --channel=${{ inputs.channel }}
-        lxc exec maas-backend -- snap install /maas.snap --dangerous
-        lxc exec maas-backend -- /connect-snap-interfaces
-        MAAS_IP=$(lxc query /1.0/containers/maas-backend/state | jq -r '.network.eth0.addresses[0].address')
-        echo "maas_ip=$MAAS_IP" >> "$GITHUB_OUTPUT"
-        # Forward localhost:5240 → container:5240 so callers can use http://localhost:5240/MAAS
-        sudo apt-get install -y socat
-        sudo socat TCP-LISTEN:5240,fork,reuseaddr TCP:${MAAS_IP}:5240 &
-
+        sudo snap install maas --channel=${{ inputs.channel }}
+        sudo snap install maas-test-db --channel=${{ inputs.channel }}
     - name: Fetch MAAS database dump
       if: inputs.use-maasdb-dump == 'true'
       uses: wei/wget@v1
       with:
         args: -O maasdb.dump ${{ inputs.maasdb-dump-url }}
-
     - name: Set up MAAS with database dump
       if: inputs.use-maasdb-dump == 'true'
       shell: bash
       run: |
         set -x
-        MAAS_IP="${{ steps.setup-lxd.outputs.maas_ip }}"
-        MAAS_URL="${{ inputs.maas-url }}"
-        MAAS_URL="${MAAS_URL:-http://${MAAS_IP}:5240/MAAS}"
-
-        lxc exec maas-backend -- sed -i \
-          "s/dynamic_shared_memory_type = posix/dynamic_shared_memory_type = sysv/" \
-          /var/snap/maas-test-db/common/postgres/data/postgresql.conf
-        lxc exec maas-backend -- snap restart maas-test-db
-        # Wait for database to be ready
-        for i in {1..30}; do
-          if lxc exec maas-backend -- snap run --shell maas-test-db.psql -c 'SELECT 1' &>/dev/null; then
-            echo "Database is ready"
-            break
-          fi
-          echo "Waiting for database to be ready..."
-          sleep 2
-        done
-        lxc file push maasdb.dump maas-backend/var/snap/maas-test-db/common/maasdb.dump
-        lxc exec maas-backend -- snap run --shell maas-test-db.psql \
-          -c 'db-dump restore /var/snap/maas-test-db/common/maasdb.dump maassampledata'
-        lxc exec maas-backend -- maas init region+rack \
-          --maas-url="$MAAS_URL" --database-uri maas-test-db:///
-        lxc exec maas-backend -- sed -i \
-          "s/database_name: maasdb/database_name: maassampledata/" \
-          /var/snap/maas/current/regiond.conf
-        lxc exec maas-backend -- snap restart maas
-        sleep 10
-
+        sudo sed -i "s/dynamic_shared_memory_type = posix/dynamic_shared_memory_type = sysv/" /var/snap/maas-test-db/common/postgres/data/postgresql.conf
+        sudo snap restart maas-test-db
+        sudo mv maasdb.dump /var/snap/maas-test-db/common/maasdb.dump
+        sudo snap run --shell maas-test-db.psql -c 'db-dump restore /var/snap/maas-test-db/common/maasdb.dump maassampledata'
+        sudo maas init region+rack --maas-url=${{inputs.maas-url}} --database-uri maas-test-db:///
+        sudo sed -i "s/database_name: maasdb/database_name: maassampledata/" /var/snap/maas/current/regiond.conf
+        sudo snap restart maas
     - name: Set up MAAS
       if: inputs.use-maasdb-dump == 'false'
       shell: bash
       run: |
         set -x
-        MAAS_IP="${{ steps.setup-lxd.outputs.maas_ip }}"
-        MAAS_URL="${{ inputs.maas-url }}"
-        MAAS_URL="${MAAS_URL:-http://${MAAS_IP}:5240/MAAS}"
-        lxc exec maas-backend -- maas init region+rack \
-          --maas-url="$MAAS_URL" --database-uri maas-test-db:///
+        sudo maas init region+rack --maas-url=${{inputs.maas-url}} --database-uri maas-test-db:///
