@@ -7,7 +7,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ["master", "main", "3.6", "3.7", "3.8"]
+        branch: ["main", "3.6", "3.7", "3.8"]
         build-from-source: [false, true]
     steps:
       - uses: actions/checkout@v4
