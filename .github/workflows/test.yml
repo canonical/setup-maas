@@ -2,7 +2,7 @@ name: Tests
 on: [push, pull_request, workflow_dispatch]
 jobs:
   setup-maas:
-    name: Setup MAAS (${{ matrix.branch }}, source=${{ matrix.build-from-source }})
+    name: Setup MAAS (${{ matrix.branch }})${{ matrix.build-from-source && ' from source' || '' }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
