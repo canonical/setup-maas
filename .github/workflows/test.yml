@@ -2,26 +2,63 @@ name: Tests
 on: [push, pull_request, workflow_dispatch]
 jobs:
   setup-maas:
-    name: Setup MAAS
-    runs-on: ubuntu-latest
+    name: Setup MAAS (${{ matrix.branch }})${{ matrix.build-from-source && ' from source' || '' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ["main", "3.6", "3.7", "3.8"]
+        build-from-source: [false, true]
     steps:
       - uses: actions/checkout@v4
       - uses: ./
-      - name: Wait for MAAS API
+        id: maas
+        with:
+          branch: ${{ matrix.branch }}
+          build-from-source: ${{ matrix.build-from-source }}
+      - name: Verify MAAS runtime
+        env:
+          CONTAINER_NAME: ${{ steps.maas.outputs.container-name }}
+          MAAS_IP: ${{ steps.maas.outputs.maas-ip }}
+          EXPECTED_RELEASE: ${{ (matrix.branch == '3.6' || matrix.branch == '3.7') && '24.04' || '26.04' }}
         run: |
-          for i in {1..60}; do
-            status_code=$(curl -L http://localhost:5240/MAAS/api/2.0/version/ -o /dev/null -w "%{http_code}" -s 2>/dev/null || echo "000")
-            if [[ "$status_code" == "200" ]]; then
-              echo "MAAS API is ready"
-              exit 0
-            fi
-            echo "MAAS API not ready yet (status: $status_code), waiting..."
-            sleep 5
-          done
-          echo "MAAS API failed to become ready"
-          exit 1
+          test "$CONTAINER_NAME" = maas-backend
+          test -n "$MAAS_IP"
+          lxc exec "$CONTAINER_NAME" -- sh -c '. /etc/os-release; test "$VERSION_ID" = "$1"' sh "$EXPECTED_RELEASE"
       - name: Create MAAS admin
         run: lxc exec maas-backend -- maas createadmin --username=admin --password=test --email=fake@example.org
+  setup-maas-from-checkout:
+    name: Setup MAAS from checkout (${{ matrix.path }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        path: [relative, absolute]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: canonical/maas
+          ref: master
+          path: maas-backend
+          submodules: recursive
+          fetch-depth: 0
+      - name: Record backend revision
+        id: backend
+        working-directory: maas-backend
+        run: echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: ./
+        with:
+          build-from-source: ${{ matrix.path == 'absolute' && format('{0}/maas-backend', github.workspace) || './maas-backend' }}
+      - name: Verify backend revisions were preserved
+        working-directory: maas-backend
+        env:
+          EXPECTED_HEAD: ${{ steps.backend.outputs.head }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git diff --exit-code HEAD -- src/maasui/src
+      - name: Create MAAS admin
+        run: lxc exec maas-backend -- maas createadmin --username=admin --password=admin --email=fake@example.org
   setup-maas-with-db-dump:
     name: Setup MAAS with dump database
     runs-on: ubuntu-latest
@@ -30,18 +67,5 @@ jobs:
       - uses: ./
         with:
           use-maasdb-dump: true
-      - name: Wait for MAAS API
-        run: |
-          for i in {1..60}; do
-            status_code=$(curl -L http://localhost:5240/MAAS/api/2.0/version/ -o /dev/null -w "%{http_code}" -s 2>/dev/null || echo "000")
-            if [[ "$status_code" == "200" ]]; then
-              echo "MAAS API is ready"
-              exit 0
-            fi
-            echo "MAAS API not ready yet (status: $status_code), waiting..."
-            sleep 5
-          done
-          echo "MAAS API failed to become ready"
-          exit 1
       - name: Verify admin user exists (from dump)
         run: lxc exec maas-backend -- maas admin users list | grep -q admin && echo "Admin user already exists from dump" || echo "Admin user not found"

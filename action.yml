@@ -1,18 +1,25 @@
 name: "Setup MAAS"
 author: "Canonical <webteam@canonical.com>"
-description: "Install and configure MAAS"
+description: "Install and configure MAAS in an Ubuntu LXD container"
 branding:
   icon: "package"
   color: "green"
 inputs:
+  branch:
+    description: "MAAS branch: master, main (alias for master), 3.6, 3.7, or 3.8"
+    required: false
+    default: "master"
+  build-from-source:
+    description: "false: install from the Snap Store; true: clone and build the backend branch; otherwise: build an existing backend checkout path (relative to github.workspace or absolute)"
+    required: false
+    default: "false"
   channel:
-    description: "MAAS snap channel — used to select the git branch to build from (e.g. latest/edge → master, 3.5/stable → stable/3.5)"
+    description: "Override the snap channel for MAAS and maas-test-db; defaults to latest/edge for master/main or <branch>/edge"
     required: false
-    default: "latest/edge"
   maas-url:
-    description: "URL of MAAS (defaults to the LXD container IP resolved at runtime)"
+    description: "URL of MAAS"
     required: false
-    default: ""
+    default: "http://localhost:5240/MAAS"
   use-maasdb-dump:
     description: "Setup MAAS with a test database dump"
     required: false
@@ -22,117 +29,261 @@ inputs:
     required: false
     default: "https://github.com/canonical/maas-ui-testing/raw/main/db/maasdb-26.04-master-1000.dump"
 
+outputs:
+  container-name:
+    description: "LXD container running MAAS"
+    value: "maas-backend"
+  maas-ip:
+    description: "IPv4 address of the MAAS container"
+    value: ${{ steps.container.outputs.maas_ip }}
+
 runs:
   using: "composite"
   steps:
-    - name: Resolve MAAS git ref from channel
-      id: resolve-ref
+    - name: Resolve MAAS branch
+      id: resolve
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.branch }}
+        BUILD_FROM_SOURCE: ${{ inputs.build-from-source }}
+        CHANNEL: ${{ inputs.channel }}
+      run: |
+        case "$BRANCH" in
+          master|main)
+            backend_branch=master
+            track=latest
+            base=core26
+            ;;
+          3.6|3.7)
+            backend_branch="$BRANCH"
+            track="$BRANCH"
+            base=core24
+            ;;
+          3.8)
+            backend_branch="$BRANCH"
+            track="$BRANCH"
+            base=core26
+            ;;
+          *)
+            echo "::error::branch must be master, main, 3.6, 3.7, or 3.8"
+            exit 1
+            ;;
+        esac
+        case "$BUILD_FROM_SOURCE" in
+          false) build_from_source=false ;;
+          "")
+            echo "::error::build-from-source must be false, true, or a backend checkout path"
+            exit 1
+            ;;
+          *) build_from_source=true ;;
+        esac
+        echo "backend_branch=$backend_branch" >> "$GITHUB_OUTPUT"
+        echo "channel=${CHANNEL:-$track/edge}" >> "$GITHUB_OUTPUT"
+        echo "base=$base" >> "$GITHUB_OUTPUT"
+        echo "build_from_source=$build_from_source" >> "$GITHUB_OUTPUT"
+    - name: Select MAAS source
+      if: steps.resolve.outputs.build_from_source == 'true'
+      id: source
+      shell: bash
+      env:
+        BACKEND_BRANCH: ${{ steps.resolve.outputs.backend_branch }}
+        BUILD_FROM_SOURCE: ${{ inputs.build-from-source }}
+      run: |
+        if [[ "$BUILD_FROM_SOURCE" == "true" ]]; then
+          source_dir=$(mktemp -d "$RUNNER_TEMP/setup-maas.XXXXXX")
+          git clone --branch "$BACKEND_BRANCH" --recurse-submodules \
+            https://github.com/canonical/maas.git "$source_dir"
+        else
+          source_dir="$BUILD_FROM_SOURCE"
+          if [[ "$source_dir" != /* ]]; then
+            source_dir="$GITHUB_WORKSPACE/$source_dir"
+          fi
+          if [[ ! -d "$source_dir" ]]; then
+            echo "::error::Backend checkout directory does not exist: $source_dir"
+            exit 1
+          fi
+        fi
+        source_dir=$(cd "$source_dir" && pwd -P)
+        if [[ "$source_dir" == *$'\n'* || "$source_dir" == *$'\r'* ]]; then
+          echo "::error::Backend checkout path must not contain line breaks"
+          exit 1
+        fi
+        if ! repo_root=$(git -C "$source_dir" rev-parse --show-toplevel); then
+          echo "::error::Backend checkout must be a Git working tree"
+          exit 1
+        fi
+        if [[ "$repo_root" != "$source_dir" || ! -f "$source_dir/Makefile" ||
+              ! -f "$source_dir/snap/snapcraft.yaml" ||
+              ! -x "$source_dir/utilities/connect-snap-interfaces" ]]; then
+          echo "::error::Backend checkout must point to the MAAS repository root with its build files"
+          exit 1
+        fi
+        submodules=$(git -C "$source_dir" submodule status --recursive)
+        if grep -q '^[-+U]' <<< "$submodules"; then
+          echo "::error::Initialize backend submodules and commit their intended revisions before building"
+          exit 1
+        fi
+        if ! git -C "$source_dir" diff --quiet --cached HEAD -- src/maasui/src; then
+          echo "::error::Commit the staged UI submodule pointer update before building"
+          exit 1
+        fi
+        echo "path=$source_dir" >> "$GITHUB_OUTPUT"
+    - name: Prepare snapd
       shell: bash
       run: |
-        CHANNEL="${{ inputs.channel }}"
-        if [[ "$CHANNEL" == "latest/edge" || "$CHANNEL" == "latest/beta" ]]; then
-          REF="master"
-        elif [[ "$CHANNEL" =~ ^([0-9]+\.[0-9]+)/ ]]; then
-          REF="stable/${BASH_REMATCH[1]}"
+        set -x
+        sudo systemctl enable --now snapd
+        sudo snap wait system seed.loaded
+        if sudo snap list snapd; then
+          sudo snap refresh snapd
         else
-          REF="master"
+          sudo snap install snapd
         fi
-        echo "ref=$REF" >> "$GITHUB_OUTPUT"
-        echo "Resolved channel '$CHANNEL' to git ref '$REF'"
-
-    - name: Checkout canonical/maas
-      uses: actions/checkout@v5
-      with:
-        repository: canonical/maas
-        ref: ${{ steps.resolve-ref.outputs.ref }}
-        fetch-depth: 0
-        path: maas-source
-        submodules: true
-
     - name: Setup LXD
       uses: canonical/setup-lxd@v1
       with:
         channel: 5.21/stable
-
+    - name: Resolve Ubuntu image
+      id: platform
+      shell: bash
+      env:
+        BASE: ${{ steps.resolve.outputs.base }}
+        SOURCE_DIR: ${{ steps.source.outputs.path }}
+      run: |
+        if [[ -n "$SOURCE_DIR" ]]; then
+          BASE=$(awk '/^base:/ {print $2}' "$SOURCE_DIR/snap/snapcraft.yaml")
+        fi
+        case "$BASE" in
+          core26)
+            image=ubuntu:resolute
+            base_channel=latest/candidate
+            snapd_channel=latest/beta
+            ;;
+          core24)
+            image=ubuntu:noble
+            base_channel=latest/stable
+            snapd_channel=latest/stable
+            ;;
+          *)
+            echo "::error::Unsupported MAAS snap base: $BASE"
+            exit 1
+            ;;
+        esac
+        echo "base=$BASE" >> "$GITHUB_OUTPUT"
+        echo "image=$image" >> "$GITHUB_OUTPUT"
+        echo "base_channel=$base_channel" >> "$GITHUB_OUTPUT"
+        echo "snapd_channel=$snapd_channel" >> "$GITHUB_OUTPUT"
     - name: Build MAAS snap
+      if: steps.resolve.outputs.build_from_source == 'true'
+      id: build
       shell: bash
+      working-directory: ${{ steps.source.outputs.path }}
+      env:
+        SNAPCRAFT_BUILD_ENVIRONMENT: lxd
+        BASE: ${{ steps.platform.outputs.base }}
+        BASE_CHANNEL: ${{ steps.platform.outputs.base_channel }}
       run: |
-        set -x
         sudo snap install snapcraft --classic
-        sudo snap refresh snapd
-        sudo snap install --candidate core26
-        cd "$GITHUB_WORKSPACE/maas-source"
+        sudo snap install "$BASE" --channel="$BASE_CHANNEL"
         make snap
+        shopt -s nullglob
+        snaps=("$PWD"/maas_*.snap)
+        if [[ "${#snaps[@]}" -ne 1 ]]; then
+          echo "::error::Expected exactly one built MAAS snap, found ${#snaps[@]}"
+          exit 1
+        fi
+        echo "snap=${snaps[0]}" >> "$GITHUB_OUTPUT"
         make snap-clean
-
-    - name: Setup LXD container
-      id: setup-lxd
+    - name: Create MAAS container
+      id: container
       shell: bash
+      env:
+        UBUNTU_IMAGE: ${{ steps.platform.outputs.image }}
+        BASE: ${{ steps.platform.outputs.base }}
+        BASE_CHANNEL: ${{ steps.platform.outputs.base_channel }}
+        SNAPD_CHANNEL: ${{ steps.platform.outputs.snapd_channel }}
+      run: |
+        lxc launch "$UBUNTU_IMAGE" maas-backend
+        lxc exec maas-backend -- cloud-init status --wait
+        lxc exec maas-backend -- snap wait system seed.loaded
+        if lxc exec maas-backend -- snap list snapd; then
+          lxc exec maas-backend -- snap refresh snapd --channel="$SNAPD_CHANNEL"
+        else
+          lxc exec maas-backend -- snap install snapd --channel="$SNAPD_CHANNEL"
+        fi
+        lxc exec maas-backend -- snap install "$BASE" --channel="$BASE_CHANNEL"
+        lxc config device add maas-backend maas-http proxy \
+          listen=tcp:127.0.0.1:5240 connect=tcp:127.0.0.1:5240
+        maas_ip=$(lxc query /1.0/containers/maas-backend/state \
+          | jq -er '[.network.eth0.addresses[] | select(.family == "inet" and .scope == "global") | .address | select(length > 0)][0]')
+        echo "maas_ip=$maas_ip" >> "$GITHUB_OUTPUT"
+    - name: Install MAAS
+      shell: bash
+      env:
+        CHANNEL: ${{ steps.resolve.outputs.channel }}
+        BUILD_FROM_SOURCE: ${{ steps.resolve.outputs.build_from_source }}
+        MAAS_SNAP: ${{ steps.build.outputs.snap }}
+        SOURCE_DIR: ${{ steps.source.outputs.path }}
       run: |
         set -x
-        cd "$GITHUB_WORKSPACE/maas-source"
-        lxc launch ubuntu:resolute maas-backend
-        lxc exec maas-backend -- cloud-init status --wait
-        lxc exec maas-backend -- snap install snapd --beta
-        lxc exec maas-backend -- snap wait system seed.loaded
-        lxc exec maas-backend -- snap install --candidate core26
-        lxc file push *.snap maas-backend/maas.snap
-        lxc file push utilities/connect-snap-interfaces maas-backend/connect-snap-interfaces
-        lxc exec maas-backend -- snap install maas-test-db --channel=${{ inputs.channel }}
-        lxc exec maas-backend -- snap install /maas.snap --dangerous
-        lxc exec maas-backend -- /connect-snap-interfaces
-        MAAS_IP=$(lxc query /1.0/containers/maas-backend/state | jq -r '.network.eth0.addresses[0].address')
-        echo "maas_ip=$MAAS_IP" >> "$GITHUB_OUTPUT"
-        # Forward localhost:5240 → container:5240 so callers can use http://localhost:5240/MAAS
-        sudo apt-get install -y socat
-        sudo socat TCP-LISTEN:5240,fork,reuseaddr TCP:${MAAS_IP}:5240 &
-
+        lxc exec maas-backend -- snap install maas-test-db --channel="$CHANNEL"
+        if [[ "$BUILD_FROM_SOURCE" == "true" ]]; then
+          lxc file push "$MAAS_SNAP" maas-backend/maas.snap
+          lxc file push "$SOURCE_DIR/utilities/connect-snap-interfaces" maas-backend/connect-snap-interfaces
+          lxc exec maas-backend -- snap install /maas.snap --dangerous
+          lxc exec maas-backend -- /connect-snap-interfaces
+        else
+          lxc exec maas-backend -- snap install maas --channel="$CHANNEL"
+        fi
     - name: Fetch MAAS database dump
       if: inputs.use-maasdb-dump == 'true'
       uses: wei/wget@v1
       with:
         args: -O maasdb.dump ${{ inputs.maasdb-dump-url }}
-
     - name: Set up MAAS with database dump
       if: inputs.use-maasdb-dump == 'true'
       shell: bash
+      env:
+        MAAS_URL: ${{ inputs.maas-url }}
       run: |
         set -x
-        MAAS_IP="${{ steps.setup-lxd.outputs.maas_ip }}"
-        MAAS_URL="${{ inputs.maas-url }}"
-        MAAS_URL="${MAAS_URL:-http://${MAAS_IP}:5240/MAAS}"
-
-        lxc exec maas-backend -- sed -i \
-          "s/dynamic_shared_memory_type = posix/dynamic_shared_memory_type = sysv/" \
-          /var/snap/maas-test-db/common/postgres/data/postgresql.conf
+        lxc exec maas-backend -- sed -i "s/dynamic_shared_memory_type = posix/dynamic_shared_memory_type = sysv/" /var/snap/maas-test-db/common/postgres/data/postgresql.conf
         lxc exec maas-backend -- snap restart maas-test-db
-        # Wait for database to be ready
-        for i in {1..30}; do
-          if lxc exec maas-backend -- snap run --shell maas-test-db.psql -c 'SELECT 1' &>/dev/null; then
-            echo "Database is ready"
-            break
-          fi
-          echo "Waiting for database to be ready..."
-          sleep 2
-        done
         lxc file push maasdb.dump maas-backend/var/snap/maas-test-db/common/maasdb.dump
-        lxc exec maas-backend -- snap run --shell maas-test-db.psql \
-          -c 'db-dump restore /var/snap/maas-test-db/common/maasdb.dump maassampledata'
-        lxc exec maas-backend -- maas init region+rack \
-          --maas-url="$MAAS_URL" --database-uri maas-test-db:///
-        lxc exec maas-backend -- sed -i \
-          "s/database_name: maasdb/database_name: maassampledata/" \
-          /var/snap/maas/current/regiond.conf
+        rm -- maasdb.dump
+        lxc exec maas-backend -- snap run --shell maas-test-db.psql -c 'db-dump restore /var/snap/maas-test-db/common/maasdb.dump maassampledata'
+        lxc exec maas-backend -- maas init region+rack --maas-url="$MAAS_URL" --database-uri maas-test-db:///
+        lxc exec maas-backend -- sed -i "s/database_name: maasdb/database_name: maassampledata/" /var/snap/maas/current/regiond.conf
         lxc exec maas-backend -- snap restart maas
-        sleep 10
-
     - name: Set up MAAS
       if: inputs.use-maasdb-dump == 'false'
       shell: bash
+      env:
+        MAAS_URL: ${{ inputs.maas-url }}
       run: |
         set -x
-        MAAS_IP="${{ steps.setup-lxd.outputs.maas_ip }}"
-        MAAS_URL="${{ inputs.maas-url }}"
-        MAAS_URL="${MAAS_URL:-http://${MAAS_IP}:5240/MAAS}"
-        lxc exec maas-backend -- maas init region+rack \
-          --maas-url="$MAAS_URL" --database-uri maas-test-db:///
+        lxc exec maas-backend -- maas init region+rack --maas-url="$MAAS_URL" --database-uri maas-test-db:///
+    - name: Wait for MAAS API
+      shell: bash
+      env:
+        MAAS_URL: ${{ inputs.maas-url }}
+      run: |
+        api_url="${MAAS_URL%/}/api/2.0/version/"
+        for attempt in {1..30}; do
+          if status_code=$(curl --noproxy '*' -L "$api_url" \
+            --connect-timeout 5 --max-time 10 \
+            -o /dev/null -w "%{http_code}" -sS); then
+            if [[ "$status_code" == "200" ]]; then
+              echo "MAAS API is ready"
+              exit 0
+            fi
+            echo "Attempt $attempt/30: MAAS API returned HTTP $status_code"
+          else
+            echo "Attempt $attempt/30: MAAS API request failed"
+          fi
+          if [[ "$attempt" -lt 30 ]]; then
+            sleep 5
+          fi
+        done
+        echo "::error::MAAS API at $api_url did not become ready after 30 attempts"
+        exit 1
