@@ -134,7 +134,11 @@ runs:
         set -x
         sudo systemctl enable --now snapd
         sudo snap wait system seed.loaded
-        sudo snap refresh snapd
+        if sudo snap list snapd; then
+          sudo snap refresh snapd
+        else
+          sudo snap install snapd
+        fi
     - name: Setup LXD
       uses: canonical/setup-lxd@v1
       with:
